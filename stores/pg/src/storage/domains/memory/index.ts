@@ -1917,21 +1917,6 @@ export class MemoryPG extends MemoryStorage {
         threadIds.add(message.threadId);
       }
 
-      for (const threadIdToCheck of threadIds) {
-        const thread = await this.#getThreadById(this.#db.client, { threadId: threadIdToCheck });
-        if (!thread) {
-          throw new MastraError({
-            id: createStorageErrorId('PG', 'SAVE_MESSAGES', 'FAILED'),
-            domain: ErrorDomain.STORAGE,
-            category: ErrorCategory.THIRD_PARTY,
-            text: `Thread ${threadIdToCheck} not found`,
-            details: {
-              threadId: threadIdToCheck,
-            },
-          });
-        }
-      }
-
       const messagesToSave = dedupeMessagesForSave(messages);
       await this.#db.client.tx(async t => {
         if (fence) await assertRunFence(t, this.#runFencesTable(), fence, 'saveMessages');
@@ -1975,15 +1960,20 @@ export class MemoryPG extends MemoryStorage {
 
         const threadTableName = getTableName({ indexName: TABLE_THREADS, schemaName: getSchemaName(this.#schema) });
         const now = toUtcISOString(new Date());
-        for (const threadIdToUpdate of threadIds) {
-          await t.none(
-            `UPDATE ${threadTableName}
-              SET
-                "updatedAt" = $1,
-                "updatedAtZ" = $2
-              WHERE id = $3`,
-            [now, now, threadIdToUpdate],
-          );
+        const updated = await t.manyOrNone<{ id: string }>(
+          `UPDATE ${threadTableName} SET "updatedAt" = $1, "updatedAtZ" = $2 WHERE id = ANY($3::text[]) RETURNING id`,
+          [now, now, [...threadIds]],
+        );
+        for (const { id } of updated) threadIds.delete(id);
+        for (const missing of threadIds) {
+          // Throw inside the transaction so a missing thread rolls back the whole batch.
+          throw new MastraError({
+            id: createStorageErrorId('PG', 'SAVE_MESSAGES', 'FAILED'),
+            domain: ErrorDomain.STORAGE,
+            category: ErrorCategory.THIRD_PARTY,
+            text: `Thread ${missing} not found`,
+            details: { threadId: missing },
+          });
         }
       });
 

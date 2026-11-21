@@ -8,6 +8,8 @@ import { RecordingDbClientBase } from './test-utils';
 import { MemoryPG } from './index';
 
 class RecordingTxClient implements TxClient {
+  constructor(private readonly threads: Map<string, Record<string, unknown>>) {}
+
   queries: RecordedQuery[] = [];
   sourceMessages: Record<string, any>[] = [];
 
@@ -28,7 +30,11 @@ class RecordingTxClient implements TxClient {
     throw new Error('not implemented');
   }
 
-  async manyOrNone<T = any>(): Promise<T[]> {
+  async manyOrNone<T = any>(query: string, values?: QueryValues): Promise<T[]> {
+    if (query.includes('RETURNING id')) {
+      this.queries.push({ query, values });
+      return (values![2] as string[]).filter(id => this.threads.has(id)).map(id => ({ id })) as T[];
+    }
     return this.sourceMessages as T[];
   }
 
@@ -47,8 +53,8 @@ class RecordingTxClient implements TxClient {
 }
 
 class RecordingDbClient extends RecordingDbClientBase {
-  readonly txClient = new RecordingTxClient();
   readonly threads = new Map<string, Record<string, unknown>>();
+  readonly txClient = new RecordingTxClient(this.threads);
 
   constructor({
     thread,
@@ -259,14 +265,13 @@ describe('MemoryPG.saveMessages', () => {
       ],
     });
 
-    expect(client.txClient.queries).toHaveLength(3);
-    const [insertQuery, firstThreadUpdate, secondThreadUpdate] = client.txClient.queries;
+    expect(client.txClient.queries).toHaveLength(2);
+    const [insertQuery, threadUpdate] = client.txClient.queries;
     expect(insertQuery!.query).toContain('INSERT INTO "public"."mastra_messages"');
-    expect(firstThreadUpdate!.values![2]).toBe('thread-1');
-    expect(secondThreadUpdate!.values![2]).toBe('thread-2');
+    expect(threadUpdate!.values![2]).toEqual(['thread-1', 'thread-2']);
   });
 
-  it('rejects messages for any missing thread before opening a transaction', async () => {
+  it('reports the missing thread in a mixed batch', async () => {
     const client = new RecordingDbClient();
     const memory = new MemoryPG({ client });
 
@@ -275,17 +280,15 @@ describe('MemoryPG.saveMessages', () => {
         messages: [createMessage({ id: 'message-1' }), createMessage({ id: 'message-2', threadId: 'thread-2' })],
       }),
     ).rejects.toThrow('Thread thread-2 not found');
-    expect(client.txClient.queries).toHaveLength(0);
   });
 
-  it('rejects messages for a missing thread before opening a transaction', async () => {
+  it('rejects messages for a missing thread', async () => {
     const client = new RecordingDbClient({ thread: null });
     const memory = new MemoryPG({ client });
 
     await expect(memory.saveMessages({ messages: [createMessage({ id: 'message-1' })] })).rejects.toThrow(
       'Thread thread-1 not found',
     );
-    expect(client.txClient.queries).toHaveLength(0);
   });
 });
 

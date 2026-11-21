@@ -76,6 +76,34 @@ export function pgTests() {
     });
 
     describe('Memory saveMessages batching', () => {
+      it('keeps the previous message and thread timestamp when another thread in the batch is missing', async () => {
+        const memory = (await store.getStore('memory'))!;
+        const thread = createSampleThread({ id: randomUUID(), resourceId: randomUUID() });
+        await memory.saveThread({ thread });
+        const message = createSampleMessageV2({
+          threadId: thread.id,
+          resourceId: thread.resourceId,
+          content: { content: 'first answer' },
+        });
+        await memory.saveMessages({ messages: [message] });
+        const readStored = () =>
+          store.db.one(
+            'SELECT m.content, t."updatedAtZ"::text FROM mastra_messages m JOIN mastra_threads t ON t.id = m.thread_id WHERE m.id = $1',
+            [message.id],
+          );
+        const before = await readStored();
+        const missing = randomUUID();
+        await expect(
+          memory.saveMessages({
+            messages: [
+              { ...message, content: { ...message.content, content: 'revised answer' } },
+              { ...message, id: randomUUID(), threadId: missing },
+            ],
+          }),
+        ).rejects.toThrow(`Thread ${missing} not found`);
+        expect(await readStored()).toEqual(before);
+      });
+
       it('should save a message batch larger than one PostgreSQL bind-parameter chunk', async () => {
         const memory = (await store.getStore('memory'))!;
         const thread = createSampleThread({
